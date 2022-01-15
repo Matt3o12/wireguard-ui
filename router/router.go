@@ -1,10 +1,11 @@
 package router
 
 import (
-	"errors"
+	"fmt"
+	"html/template"
 	"io"
+	"io/fs"
 	"reflect"
-	"text/template"
 
 	rice "github.com/GeertJohan/go.rice"
 	"github.com/gorilla/sessions"
@@ -24,8 +25,7 @@ type TemplateRegistry struct {
 func (t *TemplateRegistry) Render(w io.Writer, name string, data interface{}, c echo.Context) error {
 	tmpl, ok := t.templates[name]
 	if !ok {
-		err := errors.New("Template not found -> " + name)
-		return err
+		return fmt.Errorf("Template not found: %q", name)
 	}
 
 	// inject more app data information. E.g. appVersion
@@ -35,12 +35,45 @@ func (t *TemplateRegistry) Render(w io.Writer, name string, data interface{}, c 
 		}
 	}
 
-	// login page does not need the base layout
-	if name == "login.html" {
-		return tmpl.Execute(w, data)
+	return tmpl.Execute(w, data)
+}
+
+// riceFS is an implementation of fs.FS for rice.Box
+type riceFS struct {
+	fs *rice.Box
+}
+
+func (f riceFS) Open(name string) (fs.File, error) {
+	return f.fs.Open(name)
+}
+
+func loadTemplates(tmplBox *rice.Box) map[string]*template.Template {
+	templates := make(map[string]*template.Template)
+	// loadTempls loads the template with the given name and all sub templates
+	type templatePaths []string
+	loader := func(paths ...templatePaths) {
+		for _, files := range paths {
+			name := files[0]
+			tmpl, err := template.New(name).ParseFS(riceFS{tmplBox}, files...)
+			if err != nil {
+				log.Fatal("Error loading template: %q: %v", name, err)
+				return
+			}
+
+			templates[name] = tmpl
+		}
+
 	}
 
-	return tmpl.ExecuteTemplate(w, "base.html", data)
+	loader(
+		templatePaths{"login.html"},
+		templatePaths{"clients.html", "base.html"},
+		templatePaths{"server.html", "base.html"},
+		templatePaths{"global_settings.html", "base.html"},
+		templatePaths{"status.html", "base.html"},
+	)
+
+	return templates
 }
 
 // New function
@@ -48,45 +81,7 @@ func New(tmplBox *rice.Box, extraData map[string]string, secret []byte) *echo.Ec
 	e := echo.New()
 	e.Use(session.Middleware(sessions.NewCookieStore(secret)))
 
-	// read html template file to string
-	tmplBaseString, err := tmplBox.String("base.html")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	tmplLoginString, err := tmplBox.String("login.html")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	tmplClientsString, err := tmplBox.String("clients.html")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	tmplServerString, err := tmplBox.String("server.html")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	tmplGlobalSettingsString, err := tmplBox.String("global_settings.html")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	tmplStatusString, err := tmplBox.String("status.html")
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	// create template list
-	templates := make(map[string]*template.Template)
-	templates["login.html"] = template.Must(template.New("login").Parse(tmplLoginString))
-	templates["clients.html"] = template.Must(template.New("clients").Parse(tmplBaseString + tmplClientsString))
-	templates["server.html"] = template.Must(template.New("server").Parse(tmplBaseString + tmplServerString))
-	templates["global_settings.html"] = template.Must(template.New("global_settings").Parse(tmplBaseString + tmplGlobalSettingsString))
-	templates["status.html"] = template.Must(template.New("status").Parse(tmplBaseString + tmplStatusString))
-
 	e.Logger.SetLevel(log.DEBUG)
 	e.Pre(middleware.RemoveTrailingSlash())
 	e.Use(middleware.Logger())
@@ -98,7 +93,7 @@ func New(tmplBox *rice.Box, extraData map[string]string, secret []byte) *echo.Ec
 	e.HideBanner = true
 	e.Validator = NewValidator()
 	e.Renderer = &TemplateRegistry{
-		templates: templates,
+		templates: loadTemplates(tmplBox),
 		extraData: extraData,
 	}
 
